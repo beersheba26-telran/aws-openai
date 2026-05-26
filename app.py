@@ -4,11 +4,20 @@ import openai
 
 from logging_config import logger 
 from chat_request import chatRequest 
-from config import MODEL_NAME
+from config import MODEL_NAME, DOCUMENTS_PATH, SIMILARITY_THRESHOLD
+from text_processor_impl import textProcessor
 
 from system_prompt import SYSTEM_PROMPT
 from tools import TOOL_FUNCTIONS
-
+def _bootstrap():
+    docs: list[str] = DOCUMENTS_PATH.read_text(encoding="utf8").splitlines()
+    logger.debug(f"read {len(docs)} documents")
+    textProcessor.setDocuments(docs)  
+def _get_response_from_rag(query_text) :
+    logger.debug(f"query text is {query_text}")
+    response =  textProcessor.process(query_text, threshold=SIMILARITY_THRESHOLD)  
+    logger.debug(f"response from RAG is {response}")
+    return response
 def _finishProcess():
    print("Chat console exited. Thanks & bye")
 def _get_response_from_tool(response, messages):
@@ -29,19 +38,23 @@ def _get_response_from_tool(response, messages):
         messages.append({"role": "tool", "content": responseFromTool, "tool_call_id": tool_call.id})   
     return responseFromTool
 def _get_response(messages, client):
-    
-    response = chatRequest(MODEL_NAME, client, messages)
-    responseFromTool = _get_response_from_tool(response, messages)
+    response = _get_response_from_rag(messages[-1]["content"])
     role = "assistant"
-    if  responseFromTool:
-        response = responseFromTool
-        role = "tool"
+    if not response:
+        response = chatRequest(MODEL_NAME, client, messages)
+        responseFromTool = _get_response_from_tool(response, messages)
+        if  responseFromTool:
+            response = responseFromTool
+            role = "tool"
+        else:
+            messages.append({"role": "assistant", "content": response.content})
+            response = response.content
     else:
-       messages.append({"role": "assistant", "content": response.content})
-       response = response.content
+         messages.append({"role": "assistant", "content": response})        
     return response, role
 def main():
     client = openai.OpenAI()
+    _bootstrap()
     print(f"{MODEL_NAME} chat console started. Type 'exit' to quit.")
     messages = [
         {"role": "system", 

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from dotenv import load_dotenv  
 from os import getenv
 load_dotenv()
@@ -7,3 +9,6 @@ EXCHANGE_RATE_API_KEY = getenv("EXCHANGE_RATE_API_KEY", "b2d71961ebe71a300a02e73
 WEATHER_API_URL = getenv("WEATHER_API_URL", "http://api.weatherapi.com/v1/current.json")
 EXCHANGE_RATE_API_URL = getenv("EXCHANGE_RATE_API_URL", "https://data.fixer.io/api/latest")
 MODEL_NAME = getenv("MODEL_NAME", "openai.gpt-oss-20b")
+FASTEMBED_MODEL_NAME = getenv("FASTEMBED_MODEL_NAME", "BAAI/bge-small-en-v1.5")
+DOCUMENTS_PATH = Path(getenv("DOCUMENTS_PATH", "travel_policy.txt"))
+SIMILARITY_THRESHOLD = float(getenv("SIMILARITY_THRESHOLD", "0.7"))

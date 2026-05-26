@@ -1,14 +1,15 @@
 from abc  import ABC, abstractmethod
+from fastembed import TextEmbedding
 class TextProcessor(ABC):
-    _documents: list[str]
-    def __init__(self):
-        self._documents = []
+    
+   
+    @abstractmethod   
     def setDocuments(self, documents: list[str]):
-        self._documents = documents 
+        pass
     @abstractmethod
-    def process(self, query: str, threshold: float = 0.7) -> tuple[str, float]|None:
+    def process(self, query: str, threshold: float = 0.7) -> str|None:
         """Process the documents and return a tuple containing the document and a score.
         If no document meets the threshold, return None."""
-        pass
+        
         
              
