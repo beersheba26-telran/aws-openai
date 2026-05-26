@@ -15,12 +15,12 @@ def _get_response_from_tool(response, messages):
     responseFromTool = None 
     if response.tool_calls:
         messages.append(response)
-        tool_call = response.tool_calls[0]
-        function_name = tool_call.function.name
-        arguments = json.loads(tool_call.function.arguments)
-        logger.debug("Tool requested:", function_name)
-        logger.debug("Arguments:", arguments)
         try:
+            tool_call = response.tool_calls[0]
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+            logger.debug("Tool requested:", function_name)
+            logger.debug("Arguments:", arguments)
             responseFromTool = TOOL_FUNCTIONS[function_name](**arguments)
            
         except Exception as e:
