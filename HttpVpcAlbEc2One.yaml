@@ -1,0 +1,372 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Existing HTTP API -> VPC Link -> Internal ALB -> TG -> EC2 Docker from ECR
+
+Parameters:
+  CognitoUserPoolId:
+    Type: String
+    Default: us-east-1_3Cm6g411Y
+
+  CognitoUserPoolClientId:
+    Type: String
+    Default: 23tv2lapsv03u6soqr4agesgbb
+
+  LambdaEcrImageUri:
+    Type: String
+    Default: 246814138873.dkr.ecr.us-east-1.amazonaws.com/lambda-login:latest
+
+  LambdaTimeout:
+    Type: Number
+    Default: 30
+
+  LambdaMemorySize:
+    Type: Number
+    Default: 512
+  HttpApiId:
+    Type: String
+    Description: Existing API Gateway HTTP API ID
+    Default: qrfd5s2xt9
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0f2a9e73cc1dc3c26
+
+  AlbSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Two private subnets in different AZs for internal ALB and VPC Link
+
+  InstanceSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet for EC2 instance
+    Default: subnet-0b1113a54d4b25b02
+
+  
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  EcrImageUri:
+    Type: String
+    Description: Example 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app:latest
+    Default: 246814138873.dkr.ecr.us-east-1.amazonaws.com/rag-agent
+
+  ContainerPort:
+    Type: Number
+    Default: 3000
+
+  HealthCheckPath:
+    Type: String
+    Default: /health
+
+  RoutePath:
+    Type: String
+    Default: /chat
+    Description: Proxy route path for HTTP API
+
+
+Resources:
+  ApiGatewayVpcLinkSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for API Gateway VPC Link
+      VpcId: !Ref VpcId
+
+  AlbSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Internal ALB security group
+      VpcId: !Ref VpcId
+
+  Ec2SG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 app security group
+      VpcId: !Ref VpcId
+
+  VpcLinkToAlbEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref ApiGatewayVpcLinkSG
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      DestinationSecurityGroupId: !Ref AlbSG
+
+  AlbFromVpcLinkIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AlbSG
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref ApiGatewayVpcLinkSG
+
+  AlbToEc2Egress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSG
+      IpProtocol: tcp
+      FromPort: !Ref ContainerPort
+      ToPort: !Ref ContainerPort
+      DestinationSecurityGroupId: !Ref Ec2SG
+
+  Ec2FromAlbIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref Ec2SG
+      IpProtocol: tcp
+      FromPort: !Ref ContainerPort
+      ToPort: !Ref ContainerPort
+      SourceSecurityGroupId: !Ref AlbSG
+
+  Ec2AllOutbound:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref Ec2SG
+      IpProtocol: -1
+      CidrIp: 0.0.0.0/0
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: PullFromECR
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: "*"
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref Ec2Role
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      SubnetId: !Ref InstanceSubnetId
+      SecurityGroupIds:
+        - !Ref Ec2SG
+      
+      Tags:
+        - Key: Name
+          Value: api-private-docker-ec2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -u
+          exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+          dnf -y update || true
+          dnf -y install docker  || true
+          systemctl enable --now docker
+
+          REGION="${AWS::Region}"
+          IMAGE="${EcrImageUri}"
+          PORT="${ContainerPort}"
+
+          aws ecr get-login-password --region "$REGION" | docker login \
+            --username AWS \
+            --password-stdin "$(echo "$IMAGE" | cut -d/ -f1)"
+
+          docker pull "$IMAGE"
+
+          docker rm -f app || true
+
+          docker run -d \
+            --name app \
+            --restart unless-stopped \
+            -p ${ContainerPort}:${ContainerPort} \
+            -e PORT=${ContainerPort} \
+            "$IMAGE"
+
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub app-tg-${AWS::StackName}
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: !Ref ContainerPort
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      Matcher:
+        HttpCode: "200"
+      Targets:
+        - Id: !Ref AppInstance
+          Port: !Ref ContainerPort
+
+  InternalAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub inner-alb-${AWS::StackName}
+      Type: application
+      Scheme: internal
+      Subnets: !Ref AlbSubnetIds
+      SecurityGroups:
+        - !Ref AlbSG
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternalAlb
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargetGroup
+
+  ApiVpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: !Sub http-api-vpclink-${AWS::StackName}
+      SubnetIds: !Ref AlbSubnetIds
+      SecurityGroupIds:
+        - !Ref ApiGatewayVpcLinkSG
+
+  ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApiId
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      IntegrationUri: !Ref AlbListener
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref ApiVpcLink
+      PayloadFormatVersion: "1.0"
+  EmployeesCognitoAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApiId
+      Name: !Sub employees-cognito-authorizer-${AWS::StackName}
+      AuthorizerType: JWT
+      IdentitySource:
+        - "$request.header.Authorization"
+      JwtConfiguration:
+        Audience:
+          - !Ref CognitoUserPoolClientId
+        Issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPoolId}"
+  ChatOptionsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiId
+      RouteKey: "OPTIONS /chat"
+      Target: !Sub "integrations/${ApiIntegration}"
+      AuthorizationType: NONE
+   
+  ChatRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiId
+      RouteKey: "POST /chat"
+      Target: !Sub "integrations/${ApiIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref EmployeesCognitoAuthorizer
+
+  
+  LoginLambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApiId
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt CognitoLambdaFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  LoginRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiId
+      RouteKey: "ANY /login"
+      Target: !Sub "integrations/${LoginLambdaIntegration}"
+
+  LoginLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CognitoLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApiId}/*/*/login"    
+  CognitoLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cognito-lambda-role-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoAuthFlows
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:InitiateAuth
+                  - cognito-idp:AdminInitiateAuth
+                  - cognito-idp:RespondToAuthChallenge
+                  - cognito-idp:AdminRespondToAuthChallenge
+                Resource: !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPoolId}"
+
+  CognitoLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub cognito-login-${AWS::StackName}
+      Role: !GetAtt CognitoLambdaRole.Arn
+      PackageType: Image
+      Code:
+        ImageUri: !Ref LambdaEcrImageUri
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemorySize
+      Environment:
+        Variables:
+          COGNITO_CLIENT_ID: !Ref CognitoUserPoolClientId
+Outputs:
+  InternalAlbDnsName:
+    Value: !GetAtt InternalAlb.DNSName
+
+  TargetGroupArn:
+    Value: !Ref AppTargetGroup
+
+  VpcLinkId:
+    Value: !Ref ApiVpcLink
+
+  ApiRoute:
+    Value: !Sub "ANY ${RoutePath}"
+  CognitoAuthorizerId:
+    Value: !Ref EmployeesCognitoAuthorizer
+
+  CognitoLambdaFunctionName:
+    Value: !Ref CognitoLambdaFunction
+
+  CognitoLambdaFunctionArn:
+    Value: !GetAtt CognitoLambdaFunction.Arn  
