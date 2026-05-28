@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 class ChatStore(ABC):
     @abstractmethod
-    def create_session(name:str = None)->str:
+    def create_session(name:str = None)->tuple[str, str]:
         pass
     @abstractmethod
     def get_messages(session_id: str)-> list[dict]:

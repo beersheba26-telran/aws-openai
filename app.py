@@ -13,9 +13,11 @@ from system_prompt import SYSTEM_PROMPT
 from tools import TOOL_FUNCTIONS
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
-
+from chat_store_impl import chatStore
 class ChatRequestDTO(BaseModel):
-    query: str = Field(..., min_length=10)
+    query: str = Field(..., min_length=10, description="The user's query for the chatbot.")
+    name: str | None = Field(None, description="Optional name for the chat session, if not provided a random UUID will be used.")
+    session_id: str | None = Field(None, description="Optional session ID for the chat session, if not provided a new session will be created.")
 
 def _bootstrap():
     docs: list[str] = DOCUMENTS_PATH.read_text(encoding="utf8").splitlines()
@@ -71,11 +73,7 @@ app = FastAPI()
 def on_start_up()->None:
     app.state.client = openai.OpenAI()
     _bootstrap()
-    app.state.messages = [
-        {"role": "system", 
-            "content": SYSTEM_PROMPT
-            }
-    ]
+    app.state.chat_store = chatStore
 @app.exception_handler(RequestValidationError)
 def exception_handler(_, exc: RequestValidationError):
     logger.error(f"Validation error: {exc}")
@@ -86,12 +84,22 @@ def exception_handler(_, exc: RequestValidationError):
 @app.post("/chat")
 def chat_endpoint(body: ChatRequestDTO):
     try:
-        user_input = body.query
-        app.state.messages.append({"role": "user", "content": user_input})
-        result = None
-    
-        response, role = _get_response(app.state.messages, app.state.client)
-        result = {"response": response, "role": role}  
+        session_id, name = body.session_id, body.name
+        messages = [
+                {"role": "system", "content": SYSTEM_PROMPT}
+            ]
+        if not session_id:
+            session_id, name = app.state.chat_store.create_session(body.name)
+        else:
+            history = app.state.chat_store.get_messages(session_id)
+            messages.extend(history)
+               
+        messages.append({"role": "user", "content": body.query})
+        response, role = _get_response(messages, app.state.client)
+        logger.debug(f"last message: {messages[-1]}")
+        app.state.chat_store.append_message(session_id, "user", body.query)
+        app.state.chat_store.append_message(session_id, role, response)
+        result = {"response": response, "session_id": session_id, "name": name}
     except Exception as e:
         logger.error(f"Error processing chat request: {e}")
         result =  JSONResponse(
